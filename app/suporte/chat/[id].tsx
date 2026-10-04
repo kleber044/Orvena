@@ -5,6 +5,7 @@ import { File as ExpoFile } from "expo-file-system";
 import * as FileSystemLegacy from "expo-file-system/legacy";
 import * as ImagePicker from "expo-image-picker";
 import { router, useLocalSearchParams } from "expo-router";
+import { mensagemSegura, urlAnexoPermitida } from "../../../lib/security";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -664,13 +665,19 @@ export default function SuporteChatScreen() {
       await carregar(false);
     } catch (error) {
       console.log(`Erro ao enviar anexo na etapa ${etapa}:`, error);
-      const detalhe = error instanceof Error ? error.message : String(error);
-      setErro(`Falha no anexo (${etapa}): ${detalhe.slice(0, 180)}.${mensagemCriada ? " Uma mensagem pode ter sido criada sem arquivo; não tente reenviar antes de conferir o chat." : ""}`);
+      const detalhe = mensagemSegura(
+        error instanceof Error ? error.message : "",
+        "Não foi possível enviar o arquivo."
+      );
+      setErro(`Falha no anexo (${etapa}): ${detalhe}${mensagemCriada ? " Uma mensagem pode ter sido criada sem arquivo; não tente reenviar antes de conferir o chat." : ""}`);
     } finally { setEnviandoArquivo(false); }
   }
 
   function abrirAnexo(url?: string) {
-    if (!url) { setErro("Link do anexo indisponível. Reabra o chamado e tente novamente."); return; }
+    if (!url || !urlAnexoPermitida(url, process.env.EXPO_PUBLIC_SUPABASE_URL)) {
+      setErro("Link do anexo indisponível. Reabra o chamado e tente novamente.");
+      return;
+    }
     void Linking.openURL(url).catch(() => setErro("Não foi possível abrir o arquivo."));
   }
 

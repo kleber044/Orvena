@@ -122,7 +122,13 @@ export default function RootLayout() {
     } catch (error) {
       console.log("[ORVENA] Erro ao verificar manutenção no Supabase:", error);
       if (montado.current) {
-        setErro("Não foi possível verificar o estado do aplicativo.");
+        setManutencao({
+          ativo: false,
+          titulo: TITULO_PADRAO,
+          mensagem: MENSAGEM_PADRAO,
+          previsao: "",
+        });
+        setErro("");
       }
     } finally {
       consultaEmAndamento.current = false;

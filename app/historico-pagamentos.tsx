@@ -15,6 +15,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { mensagemSegura } from "../lib/security";
 import { supabase } from "../lib/supabase";
 
 type Pagamento = {
@@ -158,9 +159,10 @@ export default function HistoricoPagamentosScreen() {
 
       if (error || !data?.success) {
         setMensagemModal(
-          data?.error ||
-            error?.message ||
+          mensagemSegura(
+            data?.error,
             "Não foi possível verificar o pagamento agora."
+          )
         );
         return;
       }

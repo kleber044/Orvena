@@ -18,6 +18,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { mensagemSegura } from "../lib/security";
 import { supabase } from "../lib/supabase";
 
 const C = {
@@ -270,7 +271,7 @@ export default function EmpresaScreen() {
         .maybeSingle();
 
       if (error) {
-        setErro(error.message);
+        setErro(mensagemSegura(error.message, "Não foi possível carregar a empresa."));
         return;
       }
 
@@ -502,7 +503,7 @@ export default function EmpresaScreen() {
         });
 
       if (uploadError) {
-        setErro(uploadError.message);
+        setErro(mensagemSegura(uploadError.message, "Não foi possível enviar a logo."));
         return;
       }
 
@@ -526,7 +527,9 @@ export default function EmpresaScreen() {
         );
 
       if (empresaError) {
-        setErro(empresaError.message);
+        setErro(
+          mensagemSegura(empresaError.message, "Não foi possível salvar a logo.")
+        );
         return;
       }
 
@@ -630,7 +633,7 @@ export default function EmpresaScreen() {
         );
 
       if (error) {
-        setErro(error.message);
+        setErro(mensagemSegura(error.message, "Não foi possível salvar os dados da empresa."));
         return;
       }
 

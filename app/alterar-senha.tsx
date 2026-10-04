@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { traduzirErroAuth } from "../lib/auth-errors";
+import { validarSenhaNova } from "../lib/security";
 import { supabase } from "../lib/supabase";
 
 type Etapa = "email" | "codigo" | "senha";
@@ -131,8 +132,10 @@ export default function AlterarSenhaScreen() {
     setErro("");
     setMensagem("");
 
-    if (senha.length < 8) {
-      setErro("A nova senha precisa ter pelo menos 8 caracteres.");
+    const erroSenha = validarSenhaNova(senha);
+
+    if (erroSenha) {
+      setErro(erroSenha);
       return;
     }
 

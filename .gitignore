@@ -41,3 +41,8 @@ yarn-error.*
 /android
 
 .env
+
+# backups locais — não publicar rotas ou cópias antigas
+*.bak
+*.backup.txt
+restantes-sessao.txt

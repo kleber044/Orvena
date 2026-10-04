@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -17,8 +17,12 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import {
+  erroLimiteAuth,
+  erroOcultaExistenciaDaConta,
+  traduzirErroAuth,
+} from "../lib/auth-errors";
 import { supabase } from "../lib/supabase";
-import { traduzirErroAuth } from "../lib/auth-errors";
 
 const REMEMBER_KEY = "@orvena:lembrar_login";
 const EMAIL_KEY = "@orvena:login_email";
@@ -34,6 +38,8 @@ export default function LoginScreen() {
   const [carregando, setCarregando] = useState(false);
   const [carregandoPreferencias, setCarregandoPreferencias] = useState(true);
   const [erro, setErro] = useState("");
+  const falhasLogin = useRef(0);
+  const loginBloqueadoAte = useRef(0);
 
   useEffect(() => {
     let ativo = true;
@@ -143,6 +149,11 @@ export default function LoginScreen() {
       return;
     }
 
+    if (Date.now() < loginBloqueadoAte.current) {
+      setErro("Aguarde alguns instantes antes de tentar novamente.");
+      return;
+    }
+
     try {
       setCarregando(true);
       setErro("");
@@ -153,15 +164,19 @@ export default function LoginScreen() {
       });
 
       if (error) {
-        if (error.message.toLowerCase().includes("invalid login")) {
-          setErro("E-mail ou senha incorretos.");
-          return;
+        falhasLogin.current += 1;
+
+        if (falhasLogin.current >= 5) {
+          falhasLogin.current = 0;
+          loginBloqueadoAte.current = Date.now() + 30_000;
         }
 
         setErro(traduzirErroAuth(error));
         return;
       }
 
+      falhasLogin.current = 0;
+      loginBloqueadoAte.current = 0;
       await salvarPreferenciaLogin(emailLimpo);
       router.replace("/(tabs)");
     } catch {
@@ -193,7 +208,7 @@ export default function LoginScreen() {
         },
       });
 
-      if (error) {
+      if (error && (erroLimiteAuth(error) || !erroOcultaExistenciaDaConta(error))) {
         setErro(traduzirErroAuth(error));
         return;
       }
@@ -237,9 +252,7 @@ export default function LoginScreen() {
           mensagem.includes("already been confirmed") ||
           mensagem.includes("email not found")
         ) {
-          setErro(
-            "Não foi possível reenviar o código para este e-mail. Verifique se a conta ainda está pendente de confirmação."
-          );
+          setErro("Não foi possível reenviar o código para este e-mail.");
           return;
         }
 
@@ -280,7 +293,7 @@ export default function LoginScreen() {
         },
       });
 
-      if (error) {
+      if (error && (erroLimiteAuth(error) || !erroOcultaExistenciaDaConta(error))) {
         setErro(traduzirErroAuth(error));
         return;
       }

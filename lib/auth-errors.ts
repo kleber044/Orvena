@@ -1,4 +1,4 @@
-export function traduzirErroAuth(erro: unknown): string {
+function mensagemDoErro(erro: unknown) {
   const mensagemOriginal =
     erro && typeof erro === "object" && "message" in erro
       ? String((erro as { message?: unknown }).message ?? "")
@@ -6,7 +6,37 @@ export function traduzirErroAuth(erro: unknown): string {
         ? erro
         : "";
 
-  const mensagem = mensagemOriginal.trim().toLowerCase();
+  return mensagemOriginal.trim().toLowerCase();
+}
+
+export function erroOcultaExistenciaDaConta(erro: unknown) {
+  const mensagem = mensagemDoErro(erro);
+
+  return (
+    mensagem.includes("user not found") ||
+    mensagem.includes("email not found") ||
+    mensagem.includes("no user found") ||
+    mensagem.includes("user does not exist") ||
+    mensagem.includes("signups not allowed for otp") ||
+    mensagem.includes("signup not allowed for otp")
+  );
+}
+
+export function erroLimiteAuth(erro: unknown) {
+  const mensagem = mensagemDoErro(erro);
+
+  return (
+    mensagem.includes("rate limit") ||
+    mensagem.includes("rate_limit") ||
+    mensagem.includes("too many requests") ||
+    mensagem.includes("security purposes") ||
+    mensagem.includes("you can only request this after") ||
+    mensagem.includes("email rate limit exceeded")
+  );
+}
+
+export function traduzirErroAuth(erro: unknown): string {
+  const mensagem = mensagemDoErro(erro);
 
   if (!mensagem) return "Ocorreu um erro. Tente novamente.";
 
@@ -30,7 +60,7 @@ export function traduzirErroAuth(erro: unknown): string {
     mensagem.includes("already registered") ||
     mensagem.includes("already been registered")
   ) {
-    return "Já existe uma conta cadastrada com este e-mail.";
+    return "Não foi possível criar a conta com este e-mail. Se você já tem cadastro, use a tela de entrar.";
   }
 
   if (
@@ -51,14 +81,7 @@ export function traduzirErroAuth(erro: unknown): string {
     return "Código inválido. Confira e tente novamente.";
   }
 
-  if (
-    mensagem.includes("rate limit") ||
-    mensagem.includes("rate_limit") ||
-    mensagem.includes("too many requests") ||
-    mensagem.includes("security purposes") ||
-    mensagem.includes("you can only request this after") ||
-    mensagem.includes("email rate limit exceeded")
-  ) {
+  if (erroLimiteAuth(erro)) {
     return "Aguarde alguns instantes antes de tentar novamente.";
   }
 
@@ -77,11 +100,8 @@ export function traduzirErroAuth(erro: unknown): string {
     return "A nova senha precisa ser diferente da senha atual.";
   }
 
-  if (
-    mensagem.includes("user not found") ||
-    mensagem.includes("email not found")
-  ) {
-    return "Não encontramos uma conta com este e-mail.";
+  if (erroOcultaExistenciaDaConta(erro)) {
+    return "Não foi possível continuar com este e-mail. Confira os dados e tente novamente.";
   }
 
   if (
@@ -91,18 +111,6 @@ export function traduzirErroAuth(erro: unknown): string {
     mensagem.includes("fetch failed")
   ) {
     return "Não foi possível conectar. Verifique sua internet e tente novamente.";
-  }
-
-
-  if (
-    mensagem.includes("signups not allowed for otp") ||
-    mensagem.includes("signup not allowed for otp") ||
-    mensagem.includes("user does not exist") ||
-    mensagem.includes("user not found") ||
-    mensagem.includes("no user found") ||
-    mensagem.includes("email not found")
-  ) {
-    return "Não encontramos uma conta cadastrada com este e-mail.";
   }
 
   if (

@@ -10,6 +10,12 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import {
+  erroLimiteAuth,
+  erroOcultaExistenciaDaConta,
+  traduzirErroAuth,
+} from "../lib/auth-errors";
+import { validarSenhaNova } from "../lib/security";
 import { supabase } from "../lib/supabase";
 
 export default function RecuperarSenhaScreen() {
@@ -64,8 +70,8 @@ export default function RecuperarSenhaScreen() {
         },
       });
 
-      if (error) {
-        setErro(error.message);
+      if (error && (erroLimiteAuth(error) || !erroOcultaExistenciaDaConta(error))) {
+        setErro(traduzirErroAuth(error));
         return;
       }
 
@@ -118,8 +124,10 @@ export default function RecuperarSenhaScreen() {
     setErro("");
     setMensagem("");
 
-    if (senha.length < 8) {
-      setErro("A nova senha precisa ter pelo menos 8 caracteres.");
+    const erroSenha = validarSenhaNova(senha);
+
+    if (erroSenha) {
+      setErro(erroSenha);
       return;
     }
 
@@ -136,7 +144,7 @@ export default function RecuperarSenhaScreen() {
       });
 
       if (error) {
-        setErro(error.message);
+        setErro(traduzirErroAuth(error));
         return;
       }
 

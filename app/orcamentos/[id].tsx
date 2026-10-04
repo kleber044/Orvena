@@ -17,6 +17,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { mensagemSegura } from "../../lib/security";
 import { supabase } from "../../lib/supabase";
 
 type Orcamento = {
@@ -716,7 +717,7 @@ export default function OrcamentoDetalhesScreen() {
         .eq("user_id", user.id);
 
       if (error) {
-        setErro(error.message);
+        setErro(mensagemSegura(error.message, "Não foi possível alterar o status do orçamento."));
         return;
       }
 
@@ -814,7 +815,7 @@ export default function OrcamentoDetalhesScreen() {
         .eq("user_id", user.id);
 
       if (error) {
-        setErro(error.message);
+        setErro(mensagemSegura(error.message, "Não foi possível excluir este orçamento."));
         return;
       }
 

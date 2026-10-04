@@ -16,6 +16,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { traduzirErroAuth } from "../lib/auth-errors";
+import { validarSenhaNova } from "../lib/security";
 import { supabase } from "../lib/supabase";
 import { VERSAO_PRIVACIDADE, VERSAO_TERMOS } from "../lib/termos-versoes";
 
@@ -117,8 +118,10 @@ export default function CadastroScreen() {
       return false;
     }
 
-    if (senha.length < 6) {
-      setErro("A senha precisa ter pelo menos 6 caracteres.");
+    const erroSenha = validarSenhaNova(senha);
+
+    if (erroSenha) {
+      setErro(erroSenha);
       return false;
     }
 
@@ -201,7 +204,7 @@ export default function CadastroScreen() {
           mensagemErro.includes("already been registered")
         ) {
           setErro(
-            "Já existe uma conta com este e-mail. Se ela ainda não foi confirmada, entre pela tela de login e use Verificar Código."
+            "Não foi possível criar a conta com este e-mail. Se você já tem cadastro, entre pela tela de login."
           );
           return;
         }
