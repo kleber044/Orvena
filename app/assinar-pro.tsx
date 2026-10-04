@@ -1,6 +1,6 @@
 import * as Clipboard from "expo-clipboard";
 import { router } from "expo-router";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -18,25 +18,18 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
 
+import {
+  cpfValido,
+  lerMensagemCartao,
+  mensagemSegura,
+  urlCheckoutPermitida,
+} from "../lib/security";
 import { supabase } from "../lib/supabase";
 
 const PUBLIC_KEY =
   process.env.EXPO_PUBLIC_MERCADOPAGO_PUBLIC_KEY || "";
 
 type Metodo = "cartao" | "pix";
-
-type CardTokenMessage = {
-  source: "orvena-mercadopago";
-  type: "card-token";
-  token: string;
-  email: string;
-};
-
-type CardErrorMessage = {
-  source: "orvena-mercadopago";
-  type: "card-error";
-  message: string;
-};
 
 export default function AssinarProScreen() {
   const { width } = useWindowDimensions();
@@ -61,6 +54,11 @@ export default function AssinarProScreen() {
   const [mostrarPosPagamento, setMostrarPosPagamento] = useState(false);
   const [aguardandoConfirmacaoCartao, setAguardandoConfirmacaoCartao] =
     useState(false);
+  const assinaturaEmAndamento = useRef(false);
+  const pixEmAndamento = useRef(false);
+  const criarAssinaturaRef = useRef<
+    (token: string, payerEmail: string) => Promise<void>
+  >(async () => undefined);
 
   useEffect(() => {
     void carregarUsuario();
@@ -68,6 +66,7 @@ export default function AssinarProScreen() {
 
   useEffect(() => {
     if (!aguardandoConfirmacaoCartao) {
+      assinaturaEmAndamento.current = false;
       return;
     }
 
@@ -168,20 +167,22 @@ export default function AssinarProScreen() {
     }
 
     const receberMensagem = (event: MessageEvent) => {
-      const data = event.data as CardTokenMessage | CardErrorMessage;
+      if (event.origin !== window.location.origin) {
+        return;
+      }
 
-      if (!data || data.source !== "orvena-mercadopago") {
+      const data = lerMensagemCartao(event.data);
+
+      if (!data) {
         return;
       }
 
       if (data.type === "card-error") {
-        setErro(data.message || "Não foi possível validar o cartão.");
+        setErro(mensagemSegura(data.message, "Não foi possível validar o cartão."));
         return;
       }
 
-      if (data.type === "card-token") {
-        void criarAssinatura(data.token, data.email);
-      }
+      void criarAssinaturaRef.current(data.token, data.email);
     };
 
     window.addEventListener("message", receberMensagem);
@@ -219,9 +220,12 @@ export default function AssinarProScreen() {
     token: string,
     payerEmail: string
   ) {
-    if (!token || processando || aguardandoConfirmacaoCartao) {
+    if (!token || assinaturaEmAndamento.current || aguardandoConfirmacaoCartao) {
       return;
     }
+
+    assinaturaEmAndamento.current = true;
+    let aguardandoEstaCobranca = false;
 
     try {
       setProcessando(true);
@@ -240,15 +244,16 @@ export default function AssinarProScreen() {
 
       if (error) {
         console.log("Erro Edge Function assinatura:", error);
-        console.log("Erro Edge Function assinatura:", error);
         setErro("Não foi possível criar a assinatura. Tente novamente.");
         return;
       }
 
       if (!data?.success) {
         setErro(
-          data?.error ||
+          mensagemSegura(
+            data?.error,
             "O Mercado Pago não conseguiu autorizar sua assinatura."
+          )
         );
         return;
       }
@@ -270,14 +275,20 @@ export default function AssinarProScreen() {
         );
       }
 
+      aguardandoEstaCobranca = true;
       setAguardandoConfirmacaoCartao(true);
     } catch (error) {
       console.log("Erro ao criar assinatura:", error);
       setErro("Não foi possível concluir a assinatura.");
     } finally {
+      if (!aguardandoEstaCobranca) {
+        assinaturaEmAndamento.current = false;
+      }
       setProcessando(false);
     }
   }
+
+  criarAssinaturaRef.current = criarAssinatura;
 
   async function abrirCheckoutSeguroNoCelular() {
     try {
@@ -326,11 +337,18 @@ export default function AssinarProScreen() {
       }
 
       if (!data?.success || !data?.checkout_url) {
-        console.log("Resposta checkout cartão celular:", data);
+        console.log("Checkout do cartão retornou uma resposta inválida.");
         setErro(
-          data?.error ||
+          mensagemSegura(
+            data?.error,
             "Não foi possível abrir o checkout do Mercado Pago."
+          )
         );
+        return;
+      }
+
+      if (!urlCheckoutPermitida(String(data.checkout_url))) {
+        setErro("O endereço do checkout não é um link seguro do Mercado Pago.");
         return;
       }
 
@@ -358,16 +376,14 @@ export default function AssinarProScreen() {
         return;
       }
 
-      const data = JSON.parse(mensagem) as
-        | CardTokenMessage
-        | CardErrorMessage;
+      const data = lerMensagemCartao(JSON.parse(mensagem));
 
-      if (!data || data.source !== "orvena-mercadopago") {
+      if (!data) {
         return;
       }
 
       if (data.type === "card-error") {
-        setErro(data.message || "Não foi possível validar o cartão.");
+        setErro(mensagemSegura(data.message, "Não foi possível validar o cartão."));
         return;
       }
 
@@ -405,10 +421,16 @@ export default function AssinarProScreen() {
 
     const cpf = cpfPix.replace(/\D/g, "");
 
-    if (cpf.length !== 11) {
+    if (!cpfValido(cpf)) {
       setErro("Informe um CPF válido para gerar o Pix.");
       return;
     }
+
+    if (pixEmAndamento.current) {
+      return;
+    }
+
+    pixEmAndamento.current = true;
 
     try {
       setGerandoPix(true);
@@ -423,12 +445,12 @@ export default function AssinarProScreen() {
       );
 
       if (error) {
-        setErro(error.message || "Não foi possível gerar o Pix.");
+        setErro("Não foi possível gerar o Pix.");
         return;
       }
 
       if (!data?.success) {
-        setErro(data?.error || "Não foi possível gerar o Pix.");
+        setErro(mensagemSegura(data?.error, "Não foi possível gerar o Pix."));
         return;
       }
 
@@ -440,6 +462,7 @@ export default function AssinarProScreen() {
     } catch {
       setErro("Não foi possível gerar o Pix.");
     } finally {
+      pixEmAndamento.current = false;
       setGerandoPix(false);
     }
   }
@@ -462,9 +485,10 @@ export default function AssinarProScreen() {
 
       if (error || !data?.success) {
         setErro(
-          data?.error ||
-            error?.message ||
+          mensagemSegura(
+            data?.error,
             "Não foi possível consultar o pagamento."
+          )
         );
         return;
       }
@@ -997,7 +1021,7 @@ export default function AssinarProScreen() {
           return;
         }
 
-        window.parent.postMessage(payload, "*");
+        window.parent.postMessage(payload, window.location.origin);
       } catch (error) {
         console.error("Erro ao enviar mensagem para o Orvena:", error);
       }
@@ -1167,6 +1191,7 @@ export default function AssinarProScreen() {
         title: "Pagamento seguro Orvena Pro",
         srcDoc: cardFormHtml,
         scrolling: "no",
+        referrerPolicy: "no-referrer",
         allow: "payment *",
         style: {
           width: "100%",

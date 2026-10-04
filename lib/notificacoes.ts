@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import { anuncioDestinadoAoUsuario } from "./security";
 import { supabase } from "./supabase";
 
 export type NotificacaoOrvena = {
@@ -152,7 +153,11 @@ export async function carregarNotificacoesOrvena(): Promise<{
   } else {
     adicionarNotificacoesAnuncios(
       notificacoes,
-      (anunciosResult.data || []) as AnuncioResumo[]
+      (anunciosResult.data || []) as AnuncioResumo[],
+      {
+        id: user.id,
+        email: user.email ?? null,
+      }
     );
   }
 
@@ -400,12 +405,14 @@ function adicionarNotificacoesAgenda(
 
 function adicionarNotificacoesAnuncios(
   lista: NotificacaoOrvena[],
-  anuncios: AnuncioResumo[]
+  anuncios: AnuncioResumo[],
+  usuario: { id: string; email: string | null }
 ) {
   const agora = Date.now();
 
   for (const anuncio of anuncios) {
     if (!anuncio.titulo?.trim()) continue;
+    if (!anuncioDestinadoAoUsuario(anuncio, usuario)) continue;
 
     if (anuncio.data_inicio) {
       const inicio = new Date(anuncio.data_inicio).getTime();

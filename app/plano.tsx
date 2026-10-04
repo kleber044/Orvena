@@ -14,6 +14,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { mensagemSegura } from "../lib/security";
 import { supabase } from "../lib/supabase";
 
 type Plano = "free" | "trialing" | "pro";
@@ -472,8 +473,10 @@ export default function PlanoScreen() {
 
       if (!data?.success) {
         setErro(
-          data?.error ||
+          mensagemSegura(
+            data?.error,
             "Não foi possível cancelar a assinatura agora. Tente novamente."
+          )
         );
 
         return;

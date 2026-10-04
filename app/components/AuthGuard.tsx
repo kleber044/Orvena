@@ -54,20 +54,12 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
   const ehRotaPublica = ROTAS_PUBLICAS.has(rotaAtual);
   const naoVerifica = ROTAS_SEM_ACEITE.has(rotaAtual);
 
-  console.log(
-    "[AG] rota:", JSON.stringify(rotaAtual),
-    "| autenticado:", autenticado,
-    "| precisaAceitar:", precisaAceitar,
-    "| naoVerifica:", naoVerifica
-  );
-
   // Detecta saída da tela de aceite → re-verifica
   useEffect(() => {
     const anterior = rotaAnteriorRef.current;
     rotaAnteriorRef.current = rotaAtual;
 
     if (anterior === ROTA_ACEITE && rotaAtual !== ROTA_ACEITE) {
-      console.log("[AG] saiu de /aceitar-termos, re-verificando...");
       verificadoRef.current = null;
       setPrecisaAceitar(null);
       setTick((t) => t + 1);
@@ -83,17 +75,14 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
         const { data: { user }, error } = await supabase.auth.getUser();
         if (!ativo) return;
         if (error || !user) {
-          console.log("[AG] sem usuário autenticado");
           setAutenticado(false);
           verificadoRef.current = null;
           setPrecisaAceitar(null);
         } else {
-          console.log("[AG] usuário autenticado:", user.id);
           setAutenticado(true);
         }
-      } catch (e) {
+      } catch {
         if (!ativo) return;
-        console.log("[AG] erro checando sessão:", e);
         setAutenticado(false);
       }
     }
@@ -123,7 +112,6 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (autenticado !== true) return;
     if (naoVerifica) {
-      console.log("[AG] rota em ROTAS_SEM_ACEITE, pulando verificação");
       return;
     }
 
@@ -135,11 +123,9 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
         if (!ativo || !user) return;
 
         if (verificadoRef.current === user.id) {
-          console.log("[AG] aceite já verificado para este usuário");
           return;
         }
 
-        console.log("[AG] consultando tabela termos_aceites...");
         const { data, error } = await supabase
           .from("termos_aceites")
           .select("versao_termos, versao_privacidade")
@@ -151,7 +137,6 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
         if (!ativo) return;
 
         if (error) {
-          console.log("[AG] erro consultando aceite:", error.message);
           setPrecisaAceitar(true);
           verificadoRef.current = user.id;
           return;
@@ -162,17 +147,10 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
           data.versao_termos === VERSAO_TERMOS &&
           data.versao_privacidade === VERSAO_PRIVACIDADE;
 
-        console.log(
-          "[AG] aceite no banco:", JSON.stringify(data),
-          "| esperado:", VERSAO_TERMOS, "/", VERSAO_PRIVACIDADE,
-          "| OK:", ok
-        );
-
         setPrecisaAceitar(!ok);
         verificadoRef.current = user.id;
-      } catch (e) {
+      } catch {
         if (!ativo) return;
-        console.log("[AG] exceção checando aceite:", e);
         setPrecisaAceitar(true);
       }
     }
@@ -188,7 +166,6 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
 
     // Não logado em rota protegida → login
     if (autenticado === false && !ehRotaPublica) {
-      console.log("[AG] → redirecionando para /login");
       router.replace("/login" as any);
       return;
     }
@@ -199,11 +176,20 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
       precisaAceitar === true &&
       !ehRotaAceite
     ) {
-      console.log("[AG] → redirecionando para /aceitar-termos");
       router.replace("/aceitar-termos" as any);
-      return;
     }
   }, [autenticado, precisaAceitar, ehRotaPublica, ehRotaAceite]);
+
+  const conteudoBloqueado =
+    (autenticado === false && !ehRotaPublica) ||
+    (autenticado === true &&
+      precisaAceitar === true &&
+      !ehRotaAceite &&
+      !naoVerifica);
+
+  if (conteudoBloqueado) {
+    return null;
+  }
 
   return <>{children}</>;
 }
