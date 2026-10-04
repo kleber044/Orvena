@@ -1,0 +1,313 @@
+import { router, usePathname } from "expo-router";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Animated,
+  Image,
+  PanResponder,
+  Pressable,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from "react-native";
+
+import { supabase } from "../../lib/supabase";
+
+const FOTO_ATENDENTE =
+  "https://randomuser.me/api/portraits/women/44.jpg";
+
+const TAMANHO = 68;
+const MARGEM = 14;
+const LARGURA_DESKTOP = 980;
+
+export default function SupportFloatingButton() {
+  const pathname = usePathname();
+  const { width, height } = useWindowDimensions();
+
+  const [autenticado, setAutenticado] = useState(false);
+  const [oculto, setOculto] = useState(false);
+  const [fotoFalhou, setFotoFalhou] = useState(false);
+
+  const isDesktop = width >= LARGURA_DESKTOP;
+
+  const inicial = useMemo(
+    () => ({
+      x: Math.max(MARGEM, width - TAMANHO - 18),
+      y: Math.max(MARGEM, height - TAMANHO - 115),
+    }),
+    [width, height]
+  );
+
+  const posicao = useRef(new Animated.ValueXY(inicial)).current;
+  const posicaoAtual = useRef(inicial);
+  const inicioArraste = useRef(inicial);
+
+  useEffect(() => {
+    void carregarSessao();
+  }, []);
+
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAutenticado(Boolean(session?.user));
+
+      if (session?.user) {
+        setOculto(false);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const x = limitar(
+      posicaoAtual.current.x,
+      MARGEM,
+      Math.max(MARGEM, width - TAMANHO - MARGEM)
+    );
+
+    const y = limitar(
+      posicaoAtual.current.y,
+      MARGEM,
+      Math.max(MARGEM, height - TAMANHO - 85)
+    );
+
+    posicaoAtual.current = { x, y };
+    posicao.setValue({ x, y });
+  }, [width, height, posicao]);
+
+  async function carregarSessao() {
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      setAutenticado(Boolean(session?.user));
+    } catch (error) {
+      console.log("Erro ao carregar sessão do suporte:", error);
+      setAutenticado(false);
+    }
+  }
+
+  function abrirSuporte() {
+    router.push("/suporte" as any);
+  }
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+
+      onMoveShouldSetPanResponder: (_event, gesture) =>
+        Math.abs(gesture.dx) > 4 || Math.abs(gesture.dy) > 4,
+
+      onPanResponderGrant: () => {
+        inicioArraste.current = { ...posicaoAtual.current };
+      },
+
+      onPanResponderMove: (_event, gesture) => {
+        posicao.setValue({
+          x: inicioArraste.current.x + gesture.dx,
+          y: inicioArraste.current.y + gesture.dy,
+        });
+      },
+
+      onPanResponderRelease: (_event, gesture) => {
+        const x = limitar(
+          inicioArraste.current.x + gesture.dx,
+          MARGEM,
+          Math.max(MARGEM, width - TAMANHO - MARGEM)
+        );
+
+        const y = limitar(
+          inicioArraste.current.y + gesture.dy,
+          MARGEM,
+          Math.max(MARGEM, height - TAMANHO - 85)
+        );
+
+        posicaoAtual.current = { x, y };
+
+        Animated.spring(posicao, {
+          toValue: { x, y },
+          useNativeDriver: false,
+          friction: 7,
+          tension: 65,
+        }).start();
+      },
+
+      onPanResponderTerminate: () => {
+        posicao.setValue(posicaoAtual.current);
+      },
+    })
+  ).current;
+
+  const estaNoSuporte = pathname.startsWith("/suporte");
+
+  // No computador, o suporte fica no menu lateral.
+  // No celular e tablet, mantém a bolinha flutuante.
+  if (
+    isDesktop ||
+    !autenticado ||
+    oculto ||
+    estaNoSuporte
+  ) {
+    return null;
+  }
+
+  return (
+    <Animated.View
+      {...panResponder.panHandlers}
+      style={[
+        styles.container,
+        {
+          transform: posicao.getTranslateTransform(),
+        },
+      ]}
+      pointerEvents="box-none"
+    >
+      <View style={styles.shadow}>
+        <Pressable
+          onPress={abrirSuporte}
+          style={styles.button}
+          accessibilityRole="button"
+          accessibilityLabel="Abrir suporte"
+        >
+          {fotoFalhou ? (
+            <View style={styles.fallback}>
+              <Text style={styles.fallbackText}>👩‍💼</Text>
+            </View>
+          ) : (
+            <Image
+              source={{ uri: FOTO_ATENDENTE }}
+              style={styles.photo}
+              resizeMode="cover"
+              onError={() => setFotoFalhou(true)}
+            />
+          )}
+
+          <View style={styles.onlineDot} />
+        </Pressable>
+
+        <Pressable
+          onPress={() => setOculto(true)}
+          hitSlop={10}
+          style={styles.closeButton}
+          accessibilityRole="button"
+          accessibilityLabel="Ocultar botão de suporte"
+        >
+          <Text style={styles.closeText}>×</Text>
+        </Pressable>
+
+        <View style={styles.label}>
+          <Text style={styles.labelText}>SUPORTE</Text>
+        </View>
+      </View>
+    </Animated.View>
+  );
+}
+
+function limitar(
+  valor: number,
+  minimo: number,
+  maximo: number
+) {
+  return Math.min(Math.max(valor, minimo), maximo);
+}
+
+const styles = StyleSheet.create({
+  container: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    zIndex: 9999,
+    elevation: 9999,
+  },
+
+  shadow: {
+    width: TAMANHO,
+    alignItems: "center",
+  },
+
+  button: {
+    width: TAMANHO,
+    height: TAMANHO,
+    borderRadius: TAMANHO / 2,
+    borderWidth: 3,
+    borderColor: "#7C5CFF",
+    backgroundColor: "#151820",
+    overflow: "hidden",
+    shadowColor: "#000000",
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 12,
+  },
+
+  photo: {
+    width: "100%",
+    height: "100%",
+  },
+
+  fallback: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#221D38",
+  },
+
+  fallbackText: {
+    fontSize: 31,
+  },
+
+  onlineDot: {
+    position: "absolute",
+    right: 4,
+    bottom: 5,
+    width: 13,
+    height: 13,
+    borderRadius: 7,
+    borderWidth: 2,
+    borderColor: "#151820",
+    backgroundColor: "#35D07F",
+  },
+
+  closeButton: {
+    position: "absolute",
+    right: -5,
+    top: -7,
+    width: 23,
+    height: 23,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#0B0C10",
+    backgroundColor: "#2A2E37",
+    zIndex: 10,
+    elevation: 20,
+  },
+
+  closeText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    lineHeight: 18,
+    fontWeight: "900",
+  },
+
+  label: {
+    marginTop: 5,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#39304F",
+    backgroundColor: "#17131F",
+  },
+
+  labelText: {
+    color: "#B8A8FF",
+    fontSize: 7,
+    fontWeight: "900",
+    letterSpacing: 0.7,
+  },
+});

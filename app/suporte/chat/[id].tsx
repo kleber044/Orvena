@@ -1,0 +1,1243 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useAudioPlayer } from "expo-audio";
+import * as DocumentPicker from "expo-document-picker";
+import { File as ExpoFile } from "expo-file-system";
+import * as FileSystemLegacy from "expo-file-system/legacy";
+import * as ImagePicker from "expo-image-picker";
+import { router, useLocalSearchParams } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Image,
+  KeyboardAvoidingView,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+import { supabase } from "../../../lib/supabase";
+
+type Chamado = {
+  id: string;
+  user_id: string;
+  assunto: string;
+  status: "aberto" | "fechado";
+  fechado_por: "usuario" | "admin" | null;
+  admin_id: string | null;
+  admin_email: string | null;
+  admin_nome: string | null;
+  assumido_em: string | null;
+  criado_em: string;
+  atualizado_em: string;
+};
+
+type Anexo = {
+  id: string;
+  mensagem_id: string;
+  caminho: string;
+  nome_arquivo: string;
+  tipo_mime: string;
+  tamanho_bytes: number;
+};
+
+// Identifica fotos novas pelo nome interno no Storage; anexos antigos permanecem acessíveis.
+function fotoNaConversa(anexo: Anexo) {
+  return anexo.tipo_mime.startsWith("image/") &&
+    !anexo.caminho.split("/").pop()?.startsWith("arquivo-");
+}
+
+type ArquivoSelecionado = { uri: string; nome: string; tipo: string; tamanho?: number; modo: "foto" | "arquivo" };
+
+const TAMANHO_MAXIMO = 10 * 1024 * 1024;
+const ALTURA_MIN_INPUT = 46;
+const ALTURA_MAX_INPUT = 254; // aproximadamente 10 linhas visíveis; o texto não tem limite
+const TIPOS_PERMITIDOS = new Set([
+  "image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf",
+  "text/plain", "application/zip", "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+]);
+
+function mimePorNome(nome: string) {
+  const extensao = nome.split(".").pop()?.toLowerCase();
+  const tipos: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+    webp: "image/webp", gif: "image/gif", pdf: "application/pdf", txt: "text/plain",
+    zip: "application/zip", doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
+  return tipos[extensao || ""] || "";
+}
+
+function tamanhoLegivel(bytes: number) { return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
+
+type Mensagem = {
+  id: string;
+  remetente_tipo: "usuario" | "admin" | "sistema";
+  remetente_email: string | null;
+  mensagem: string;
+  criado_em: string;
+};
+
+function hora(valor: string) {
+  const data = new Date(valor);
+  if (Number.isNaN(data.getTime())) return "";
+
+  return data.toLocaleTimeString("pt-BR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export default function SuporteChatScreen() {
+  const { width } = useWindowDimensions();
+  const desktop = width >= 960;
+  const larguraBalaoFoto = Math.min(Math.max(width - (desktop ? 300 : 105), 210), desktop ? 420 : 350);
+  const params = useLocalSearchParams<{ id: string }>();
+  const chamadoId = Array.isArray(params.id) ? params.id[0] : params.id;
+
+  const sendPlayer = useAudioPlayer(
+    require("../../../assets/sounds/support-send.wav")
+  );
+  const receivePlayer = useAudioPlayer(
+    require("../../../assets/sounds/support-receive.wav")
+  );
+
+  const scrollRef = useRef<ScrollView>(null);
+  const noFinalRef = useRef(true);
+  const scrollInicialRef = useRef(true);
+  const mensagensConhecidasRef = useRef<Set<string> | null>(null);
+  const carregamentoEmAndamentoRef = useRef(false);
+  const atualizacaoPendenteRef = useRef(false);
+  const consultaWebEmAndamentoRef = useRef(false);
+  const receivePlayerRef = useRef(receivePlayer);
+  receivePlayerRef.current = receivePlayer;
+  const mensagemAutomaticaEmEnvio = useRef(false);
+  const mensagemAutomaticaTentada = useRef<string | null>(null);
+
+  const [chamado, setChamado] = useState<Chamado | null>(null);
+  const [mensagens, setMensagens] = useState<Mensagem[]>([]);
+  const [texto, setTexto] = useState("");
+  const [carregando, setCarregando] = useState(true);
+  const [enviando, setEnviando] = useState(false);
+  const [fechando, setFechando] = useState(false);
+  const [erro, setErro] = useState("");
+  const [anexos, setAnexos] = useState<Record<string, Anexo[]>>({});
+  const [urlsAnexos, setUrlsAnexos] = useState<Record<string, string>>({});
+  const [arquivoSelecionado, setArquivoSelecionado] = useState<ArquivoSelecionado | null>(null);
+  const [enviandoArquivo, setEnviandoArquivo] = useState(false);
+  const [alturaInput, setAlturaInput] = useState(ALTURA_MIN_INPUT);
+  const inputRef = useRef<TextInput>(null);
+  const larguraInputRef = useRef(0);
+  const bytesDocumentoRef = useRef<{ uri: string; bytes: Uint8Array } | null>(null);
+  // Presença efêmera: nenhum texto digitado é enviado ou gravado.
+  const [adminDigitando, setAdminDigitando] = useState(false);
+  const canalDigitacaoRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const digitacaoProntaRef = useRef(false);
+  const textoAtualRef = useRef("");
+  const ultimoAvisoRef = useRef(0);
+
+  function avisarDigitacao(ativo: boolean) {
+    if (!digitacaoProntaRef.current || !canalDigitacaoRef.current) return;
+    const agora = Date.now();
+    if (ativo && agora - ultimoAvisoRef.current < 900) return;
+    ultimoAvisoRef.current = ativo ? agora : 0;
+    void canalDigitacaoRef.current.send({
+      type: "broadcast", event: "digitando", payload: { papel: "usuario", ativo },
+    });
+  }
+
+  function alterarTexto(valor: string) {
+    textoAtualRef.current = valor;
+    setTexto(valor);
+    if (Platform.OS === "web") {
+      // O textarea web começa com UMA linha. Mede somente após a digitação,
+      // evitando o onContentSizeChange inicial que expandia o campo sem texto.
+      const larguraUtil = Math.max(80, larguraInputRef.current - 30);
+      const caracteresPorLinha = Math.max(8, Math.floor(larguraUtil / 8.1));
+      const linhas = valor.split("\n").reduce((total, linha) =>
+        total + Math.max(1, Math.ceil(linha.length / caracteresPorLinha)), 0);
+      setAlturaInput(Math.min(ALTURA_MAX_INPUT, Math.max(ALTURA_MIN_INPUT, linhas * 23 + 23)));
+    } else if (!valor) setAlturaInput(ALTURA_MIN_INPUT);
+    if (!valor.trim()) { avisarDigitacao(false); return; }
+    avisarDigitacao(true);
+  }
+
+  useEffect(() => {
+    const intervalo = setInterval(() => {
+      if (textoAtualRef.current.trim() && digitacaoProntaRef.current && canalDigitacaoRef.current) {
+        void canalDigitacaoRef.current.send({ type: "broadcast", event: "digitando", payload: { papel: "usuario", ativo: true } });
+      }
+    }, 10000);
+    return () => clearInterval(intervalo);
+  }, []);
+
+  useEffect(() => {
+    if (!chamadoId || chamado?.status !== "aberto") return;
+    setAdminDigitando(false);
+    const canal = supabase.channel(`orvena-suporte-digitando-${chamadoId}`)
+      .on("broadcast", { event: "digitando" }, ({ payload }) => {
+        if (payload?.papel !== "admin") return;
+        setAdminDigitando(payload.ativo === true);
+      })
+      .subscribe((status) => { digitacaoProntaRef.current = status === "SUBSCRIBED"; if (status === "SUBSCRIBED" && textoAtualRef.current.trim()) { void canal.send({ type: "broadcast", event: "digitando", payload: { papel: "usuario", ativo: true } }); } });
+    canalDigitacaoRef.current = canal;
+    return () => {
+      if (digitacaoProntaRef.current) void canal.send({ type: "broadcast", event: "digitando", payload: { papel: "usuario", ativo: false } });
+      digitacaoProntaRef.current = false;
+      canalDigitacaoRef.current = null;
+      void supabase.removeChannel(canal);
+    };
+  }, [chamadoId, chamado?.status]);
+
+
+  const carregar = useCallback(
+    async (mostrarLoading = false) => {
+      if (!chamadoId) return;
+      if (carregamentoEmAndamentoRef.current) {
+        atualizacaoPendenteRef.current = true;
+        return;
+      }
+      carregamentoEmAndamentoRef.current = true;
+
+      try {
+        if (mostrarLoading) setCarregando(true);
+
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (!user) {
+          router.replace("/login" as any);
+          return;
+        }
+
+        const [chamadoResult, mensagensResult] = await Promise.all([
+          supabase
+            .from("suporte_chamados")
+            .select("*")
+            .eq("id", chamadoId)
+            .eq("user_id", user.id)
+            .maybeSingle(),
+          supabase
+            .from("suporte_mensagens")
+            .select(
+              "id, remetente_tipo, remetente_email, mensagem, criado_em"
+            )
+            .eq("chamado_id", chamadoId)
+            .order("criado_em", { ascending: true }),
+        ]);
+
+        if (chamadoResult.error || !chamadoResult.data) {
+          setErro("Atendimento não encontrado.");
+          return;
+        }
+
+        if (mensagensResult.error) {
+          console.log("Erro mensagens suporte:", mensagensResult.error);
+          setErro("Não foi possível carregar as mensagens.");
+          return;
+        }
+
+        const novasMensagens =
+          (mensagensResult.data || []) as Mensagem[];
+
+        // A primeira leitura cria a referência sem tocar sons de mensagens antigas.
+        // Leituras seguintes identificam mensagens pelo ID (inclusive as do bot).
+        const conhecidos = mensagensConhecidasRef.current;
+        if (conhecidos === null) {
+          mensagensConhecidasRef.current = new Set(
+            novasMensagens.map((item) => item.id)
+          );
+        } else {
+          const recebidas = novasMensagens.filter(
+            (item) =>
+              !conhecidos.has(item.id) &&
+              (item.remetente_tipo === "admin" || item.remetente_tipo === "sistema")
+          );
+          novasMensagens.forEach((item) => conhecidos.add(item.id));
+          if (recebidas.length > 0) {
+            try {
+              receivePlayerRef.current.seekTo(0);
+              receivePlayerRef.current.play();
+            } catch (error) {
+              console.log("Erro ao tocar som de recebimento:", error);
+            }
+          }
+        }
+
+        setChamado(chamadoResult.data as Chamado);
+        setMensagens((anteriores) => {
+          const porId = new Map(anteriores.map((item) => [item.id, item]));
+          novasMensagens.forEach((item) => porId.set(item.id, item));
+          const unidas = [...porId.values()].sort((a, b) =>
+            a.criado_em.localeCompare(b.criado_em)
+          );
+          if (unidas.length === anteriores.length && unidas.every((m, i) => m.id === anteriores[i].id && m.mensagem === anteriores[i].mensagem)) return anteriores;
+          return unidas;
+        });
+        setErro("");
+      } catch (error) {
+        console.log("Erro ao atualizar conversa:", error);
+        setErro("Não foi possível atualizar a conversa.");
+      } finally {
+        carregamentoEmAndamentoRef.current = false;
+        setCarregando(false);
+        if (atualizacaoPendenteRef.current) {
+          atualizacaoPendenteRef.current = false;
+          setTimeout(() => { void carregar(false); }, 0);
+        }
+      }
+    },
+    [chamadoId]
+  );
+
+  // Na web, a leitura das mensagens é independente da consulta ao chamado.
+  // Assim uma consulta de perfil/chamado lenta não impede novas mensagens de aparecer.
+  const atualizarMensagensWeb = useCallback(async () => {
+    if (!chamadoId || Platform.OS !== "web" || consultaWebEmAndamentoRef.current) return;
+    // A primeira carga define quais mensagens já existiam, sem disparar som retroativo.
+    if (mensagensConhecidasRef.current === null) return;
+    consultaWebEmAndamentoRef.current = true;
+    try {
+      const { data, error } = await supabase
+        .from("suporte_mensagens")
+        .select("id, remetente_tipo, remetente_email, mensagem, criado_em")
+        .eq("chamado_id", chamadoId)
+        .order("criado_em", { ascending: true });
+      if (error) {
+        console.log("Erro na atualização web do suporte:", error);
+        return;
+      }
+      const atualizadas = (data ?? []) as Mensagem[];
+      const conhecidas = mensagensConhecidasRef.current;
+      if (conhecidas === null) return;
+      const recebidas = atualizadas.some(
+        (item) => !conhecidas.has(item.id) &&
+          (item.remetente_tipo === "admin" || item.remetente_tipo === "sistema")
+      );
+      atualizadas.forEach((item) => conhecidas.add(item.id));
+      setMensagens((anteriores) => {
+        // Atualiza apenas quando algo mudou e preserva eventos Realtime recebidos
+        // enquanto a consulta estava em trânsito.
+        const porId = new Map(anteriores.map((item) => [item.id, item]));
+        atualizadas.forEach((item) => porId.set(item.id, item));
+        const unidas = [...porId.values()].sort((a, b) =>
+          a.criado_em.localeCompare(b.criado_em)
+        );
+        if (unidas.length === anteriores.length &&
+            unidas.every((item, i) => item.id === anteriores[i].id)) return anteriores;
+        return unidas;
+      });
+      if (recebidas) {
+        try {
+          receivePlayerRef.current.seekTo(0);
+          receivePlayerRef.current.play();
+        } catch (error) {
+          console.log("Som de recebimento indisponível:", error);
+        }
+      }
+    } catch (error) {
+      console.log("Falha na consulta web do suporte:", error);
+    } finally {
+      consultaWebEmAndamentoRef.current = false;
+    }
+  }, [chamadoId]);
+
+  useEffect(() => {
+    mensagensConhecidasRef.current = null;
+    atualizacaoPendenteRef.current = false;
+    void carregar(true);
+
+    // Mantém a conversa atualizada sem F5, mesmo se o Realtime não estiver habilitado.
+    const timer = setInterval(() => {
+      if (Platform.OS === "web") {
+        void atualizarMensagensWeb();
+      } else {
+        void carregar(false);
+      }
+    }, 1200);
+
+    // Ao voltar à aba do navegador, sincroniza imediatamente.
+    const sincronizarAoVoltar = () => {
+      if (Platform.OS === "web") {
+        void atualizarMensagensWeb();
+        void carregar(false);
+      }
+    };
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      window.addEventListener("focus", sincronizarAoVoltar);
+      document.addEventListener("visibilitychange", sincronizarAoVoltar);
+    }
+
+    const canal = supabase
+      .channel(`suporte-chat-usuario-${chamadoId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "suporte_mensagens",
+          filter: `chamado_id=eq.${chamadoId}`,
+        },
+        (payload) => {
+          // Mostra a mensagem recebida imediatamente se o Realtime estiver habilitado.
+          const nova = payload.new as Mensagem;
+          if (nova && typeof nova.id === "string" && typeof nova.mensagem === "string") {
+            const conhecidos = mensagensConhecidasRef.current;
+            if (conhecidos !== null && !conhecidos.has(nova.id)) {
+              conhecidos.add(nova.id);
+              if (nova.remetente_tipo === "admin" || nova.remetente_tipo === "sistema") {
+                try {
+                  receivePlayerRef.current.seekTo(0);
+                  receivePlayerRef.current.play();
+                } catch (error) {
+                  console.log("Erro ao tocar som de recebimento:", error);
+                }
+              }
+              setMensagens((atual) => {
+                if (atual.some((item) => item.id === nova.id)) return atual;
+                return [...atual, nova].sort((a, b) =>
+                  a.criado_em.localeCompare(b.criado_em)
+                );
+              });
+            }
+          }
+          // Também atualiza o status do chamado e reconcilia possíveis eventos perdidos.
+          if (Platform.OS === "web") void atualizarMensagensWeb();
+          void carregar(false);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      clearInterval(timer);
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        window.removeEventListener("focus", sincronizarAoVoltar);
+        document.removeEventListener("visibilitychange", sincronizarAoVoltar);
+      }
+      void supabase.removeChannel(canal);
+    };
+  }, [carregar, chamadoId, atualizarMensagensWeb]);
+
+  // A função RPC valida o proprietário, exige cinco segundos e impede duplicatas.
+  // O disparo aqui depende de o chat estar aberto; agendamento independente requer servidor.
+  useEffect(() => {
+    if (!chamadoId || !chamado || chamado.status !== "aberto") return;
+
+    const criadoEm = new Date(chamado.criado_em).getTime();
+    if (!Number.isFinite(criadoEm)) return;
+
+    const espera = Math.max(0, criadoEm + 5000 - Date.now());
+    const timer = setTimeout(async () => {
+      if (
+        mensagemAutomaticaEmEnvio.current ||
+        mensagemAutomaticaTentada.current === chamadoId
+      ) return;
+      mensagemAutomaticaEmEnvio.current = true;
+      mensagemAutomaticaTentada.current = chamadoId;
+
+      try {
+        const { data: enviada, error: rpcErro } = await supabase.rpc(
+          "enviar_mensagem_automatica_suporte",
+          { p_chamado_id: chamadoId }
+        );
+
+        if (rpcErro) {
+          console.log("Erro ao registrar mensagem automática:", rpcErro);
+        } else {
+          // O polling continuará buscando até a mensagem aparecer, mesmo se
+          // já existir ou se outra consulta estiver em andamento.
+          if (Platform.OS === "web") await atualizarMensagensWeb();
+          else await carregar(false);
+        }
+      } catch (error) {
+        console.log("Erro na mensagem automática:", error);
+      } finally {
+        mensagemAutomaticaEmEnvio.current = false;
+      }
+    }, espera);
+
+    return () => clearTimeout(timer);
+    // O temporizador depende apenas dos dados do chamado, não do polling do chat.
+  }, [chamadoId, chamado?.id, chamado?.status, chamado?.criado_em]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (noFinalRef.current) scrollRef.current?.scrollToEnd({ animated: false });
+      scrollInicialRef.current = false;
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [mensagens.length]);
+
+  // Consulta anexos separadamente: mensagens antigas continuam compatíveis.
+  useEffect(() => {
+    if (!chamadoId || mensagens.length === 0) return;
+    let ativo = true;
+    const ids = mensagens.map((m) => m.id);
+    async function buscarAnexos() {
+      const { data, error } = await supabase.from("suporte_anexos")
+        .select("id, mensagem_id, caminho, nome_arquivo, tipo_mime, tamanho_bytes")
+        .in("mensagem_id", ids);
+      if (error || !ativo) {
+        if (error) console.log("Erro ao consultar anexos:", error);
+        return;
+      }
+      const lista = (data || []) as Anexo[];
+      const agrupados: Record<string, Anexo[]> = {};
+      lista.forEach((anexo) => {
+        if (!agrupados[anexo.mensagem_id]) agrupados[anexo.mensagem_id] = [];
+        agrupados[anexo.mensagem_id].push(anexo);
+      });
+      setAnexos((anteriores) => {
+        const antigo = Object.values(anteriores).flat().map((x) => x.id).sort().join("|");
+        const novo = lista.map((x) => x.id).sort().join("|");
+        return antigo === novo ? anteriores : agrupados;
+      });
+      for (const anexo of lista) {
+        const { data: assinada, error: urlErro } = await supabase.storage
+          .from("suporte-anexos").createSignedUrl(anexo.caminho, 3600);
+        if (ativo && !urlErro && assinada?.signedUrl) {
+          setUrlsAnexos((atuais) => atuais[anexo.id] ? atuais : ({ ...atuais, [anexo.id]: assinada.signedUrl }));
+        }
+      }
+    }
+    void buscarAnexos();
+    return () => { ativo = false; };
+  }, [chamadoId, mensagens.length]);
+
+  function validarArquivo(arquivo: ArquivoSelecionado) {
+    if (!TIPOS_PERMITIDOS.has(arquivo.tipo)) {
+      setErro("Formato não permitido. Envie foto, PDF, TXT, ZIP, Word ou Excel.");
+      return false;
+    }
+    if (arquivo.tamanho && arquivo.tamanho > TAMANHO_MAXIMO) {
+      setErro("O arquivo deve ter até 10 MB.");
+      return false;
+    }
+    setErro("");
+    setArquivoSelecionado(arquivo);
+    return true;
+  }
+
+  async function escolherDocumento() {
+    try {
+      // No Android, evita a URI temporaria file:// do DocumentPicker que pode
+      // desaparecer antes do envio. Copiamos o content:// para o cache proprio.
+      const resultado = await DocumentPicker.getDocumentAsync({
+        type: "*/*",
+        copyToCacheDirectory: Platform.OS !== "android",
+      });
+      if (resultado.canceled || !resultado.assets?.[0]) return;
+      const selecionado = resultado.assets[0];
+      const arquivo: ArquivoSelecionado = {
+        uri: selecionado.uri,
+        nome: selecionado.name,
+        tipo: mimePorNome(selecionado.name) || selecionado.mimeType || "",
+        tamanho: selecionado.size,
+        modo: "arquivo",
+      };
+      if (!TIPOS_PERMITIDOS.has(arquivo.tipo)) {
+        setErro("Formato não permitido. Envie foto, PDF, TXT, ZIP, Word ou Excel.");
+        return;
+      }
+      if (arquivo.tamanho && arquivo.tamanho > TAMANHO_MAXIMO) {
+        setErro("O arquivo deve ter até 10 MB.");
+        return;
+      }
+      bytesDocumentoRef.current = null;
+      if (Platform.OS === "android") {
+        // Faz a copia e a leitura imediatamente, ainda na etapa de selecao.
+        // Assim o botao Enviar nao depende de uma URI temporaria do provedor.
+        if (arquivo.uri.startsWith("content://")) {
+          const pasta = FileSystemLegacy.cacheDirectory;
+          if (!pasta) throw new Error("Cache do aplicativo indisponível.");
+          const destino = `${pasta}orvena-documento-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          await FileSystemLegacy.copyAsync({ from: arquivo.uri, to: destino });
+          arquivo.uri = destino;
+        }
+        const bytes = await lerBytesAnexo(arquivo.uri);
+        if (!bytes.length || bytes.length > TAMANHO_MAXIMO) {
+          setErro("Arquivo vazio ou maior que 10 MB.");
+          return;
+        }
+        bytesDocumentoRef.current = { uri: arquivo.uri, bytes };
+        arquivo.tamanho = bytes.length;
+      }
+      validarArquivo(arquivo);
+    } catch (error) {
+      bytesDocumentoRef.current = null;
+      console.log("Erro ao preparar documento:", error);
+      const detalhe = error instanceof Error ? error.message : String(error);
+      setErro(`Não foi possível preparar o documento: ${detalhe.slice(0, 150)}. Tente selecioná-lo em Arquivos/Downloads.`);
+    }
+  }
+
+  async function escolherFoto() {
+    try {
+      bytesDocumentoRef.current = null;
+      const resultado = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"], allowsEditing: false, quality: 1,
+      });
+      if (resultado.canceled || !resultado.assets?.[0]) return;
+      const arquivo = resultado.assets[0];
+      const nome = arquivo.fileName || `foto-${Date.now()}.jpg`;
+      validarArquivo({ uri: arquivo.uri, nome,
+        tipo: arquivo.mimeType || mimePorNome(nome) || "image/jpeg", tamanho: arquivo.fileSize, modo: "foto" });
+    } catch (error) {
+      console.log("Erro ao escolher foto:", error);
+      setErro("Não foi possível selecionar a foto.");
+    }
+  }
+
+  async function lerBytesAnexo(uri: string): Promise<Uint8Array> {
+    if (Platform.OS === "web") {
+      const resposta = await fetch(uri);
+      if (!resposta.ok) throw new Error("Não foi possível ler o arquivo selecionado.");
+      return new Uint8Array(await resposta.arrayBuffer());
+    }
+    // Evita readAsStringAsync: o erro observado indica que o arquivo do
+    // DocumentPicker nao existe mais naquele caminho de cache.
+    return new Uint8Array(await new ExpoFile(uri).arrayBuffer());
+  }
+
+  async function enviarArquivo() {
+    const arquivo = arquivoSelecionado;
+    if (!arquivo || !chamadoId || chamado?.status !== "aberto" || enviandoArquivo) return;
+    setEnviandoArquivo(true);
+    setErro("");
+    let etapa = "leitura";
+    let mensagemCriada = false;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { router.replace("/login" as any); return; }
+      const preparado = bytesDocumentoRef.current;
+      const bytes = preparado?.uri === arquivo.uri
+        ? preparado.bytes : await lerBytesAnexo(arquivo.uri);
+      if (!bytes.length || bytes.length > TAMANHO_MAXIMO) {
+        setErro("Arquivo vazio ou maior que 10 MB.");
+        return;
+      }
+      // O Supabase Storage no React Native aceita ArrayBuffer como corpo binário.
+      // Enviar Uint8Array diretamente pode falhar em alguns dispositivos Android.
+      const buffer = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buffer).set(bytes);
+      etapa = "mensagem";
+      const { data: mensagem, error: erroMensagem } = await supabase
+        .from("suporte_mensagens").insert({ chamado_id: chamadoId,
+          remetente_tipo: "usuario", remetente_id: user.id,
+          remetente_email: user.email || null,
+          mensagem: texto.trim() || (arquivo.modo === "foto" ? "" : `📎 ${arquivo.nome}`) })
+        .select("id").single();
+      if (erroMensagem || !mensagem) throw erroMensagem || new Error("Mensagem não criada");
+      mensagemCriada = true;
+      const nomeSeguro = arquivo.nome.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100) || "arquivo";
+      const caminho = `${user.id}/${chamadoId}/${mensagem.id}/${arquivo.modo === "foto" ? "foto" : "arquivo"}-${Date.now()}-${nomeSeguro}`;
+      etapa = "upload";
+      const { error: erroUpload } = await supabase.storage.from("suporte-anexos")
+        .upload(caminho, buffer, { contentType: arquivo.tipo, upsert: false });
+      if (erroUpload) throw erroUpload;
+      etapa = "registro";
+      const { error: erroAnexo } = await supabase.from("suporte_anexos").insert({
+        mensagem_id: mensagem.id, caminho, nome_arquivo: arquivo.nome,
+        tipo_mime: arquivo.tipo, tamanho_bytes: bytes.length,
+      });
+      if (erroAnexo) throw erroAnexo;
+      setArquivoSelecionado(null);
+      bytesDocumentoRef.current = null;
+      avisarDigitacao(false);
+      textoAtualRef.current = "";
+      setTexto("");
+      setAlturaInput(ALTURA_MIN_INPUT);
+      try { sendPlayer.seekTo(0); sendPlayer.play(); } catch { /* áudio opcional */ }
+      await carregar(false);
+    } catch (error) {
+      console.log(`Erro ao enviar anexo na etapa ${etapa}:`, error);
+      const detalhe = error instanceof Error ? error.message : String(error);
+      setErro(`Falha no anexo (${etapa}): ${detalhe.slice(0, 180)}.${mensagemCriada ? " Uma mensagem pode ter sido criada sem arquivo; não tente reenviar antes de conferir o chat." : ""}`);
+    } finally { setEnviandoArquivo(false); }
+  }
+
+  function abrirAnexo(url?: string) {
+    if (!url) { setErro("Link do anexo indisponível. Reabra o chamado e tente novamente."); return; }
+    void Linking.openURL(url).catch(() => setErro("Não foi possível abrir o arquivo."));
+  }
+
+  async function enviar() {
+    const mensagem = texto.trim();
+
+    if (!mensagem || !chamadoId || chamado?.status !== "aberto") {
+      return;
+    }
+
+    try {
+      setEnviando(true);
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        router.replace("/login" as any);
+        return;
+      }
+
+      const agora = new Date().toISOString();
+
+      const { error } = await supabase.from("suporte_mensagens").insert({
+        chamado_id: chamadoId,
+        remetente_tipo: "usuario",
+        remetente_id: user.id,
+        remetente_email: user.email || null,
+        mensagem,
+        criado_em: agora,
+      });
+
+      if (error) {
+        console.log("Erro enviar chat:", error);
+        setErro("Não foi possível enviar sua mensagem.");
+        return;
+      }
+
+      await supabase
+        .from("suporte_chamados")
+        .update({ atualizado_em: agora })
+        .eq("id", chamadoId)
+        .eq("user_id", user.id)
+        .eq("status", "aberto");
+
+      try {
+        sendPlayer.seekTo(0);
+        sendPlayer.play();
+      } catch (error) {
+        console.log("Erro ao tocar som de envio:", error);
+      }
+
+      avisarDigitacao(false);
+      textoAtualRef.current = "";
+      setTexto("");
+      setAlturaInput(ALTURA_MIN_INPUT);
+      await carregar(false);
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  function confirmarFechamento() {
+    if (chamado?.status !== "aberto") return;
+
+    if (Platform.OS === "web") {
+      if (typeof globalThis.confirm === "function" && globalThis.confirm("Encerrar atendimento?\n\nDepois de encerrado, este chat ficará somente para consulta.")) {
+        void fecharChat();
+      }
+      return;
+    }
+
+    Alert.alert(
+      "Encerrar atendimento?",
+      "Depois de encerrado, este chat ficará somente para consulta.",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Encerrar",
+          style: "destructive",
+          onPress: () => void fecharChat(),
+        },
+      ]
+    );
+  }
+
+  async function fecharChat() {
+    if (!chamadoId) return;
+
+    try {
+      setFechando(true);
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) return;
+
+      const agora = new Date().toISOString();
+
+      const { error } = await supabase
+        .from("suporte_chamados")
+        .update({
+          status: "fechado",
+          fechado_por: "usuario",
+          fechado_por_nome: "Usuário",
+          fechado_por_email: user.email || null,
+          fechado_em: agora,
+          atualizado_em: agora,
+        })
+        .eq("id", chamadoId)
+        .eq("user_id", user.id)
+        .eq("status", "aberto");
+
+      if (error) {
+        setErro("Não foi possível encerrar o atendimento.");
+        return;
+      }
+
+      await carregar(false);
+    } finally {
+      setFechando(false);
+    }
+  }
+
+  if (carregando) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loading}>
+          <ActivityIndicator size="large" color="#7C5CFF" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <View style={[styles.page, desktop && styles.pageDesktop]}>
+          {/* Barra compacta integrada à conversa: sem painéis empilhados nem divisórias. */}
+          <View style={styles.topBar}>
+            <Pressable style={styles.topBack} onPress={() => {
+              if (router.canGoBack()) router.back();
+              else router.replace("/suporte" as any);
+            }} accessibilityLabel="Voltar ao suporte">
+              <Ionicons name="chevron-back" size={25} color="#F7F5F0" />
+            </Pressable>
+            <View style={styles.topAvatar}>
+              <Ionicons name="headset" size={23} color="#151A1E" />
+            </View>
+            <View style={styles.topTitleArea}>
+              <Text style={styles.topTitle} numberOfLines={1}>Equipe de suporte</Text>
+              <View style={styles.topStatusRow}>
+                <View style={[styles.topStatusDot, chamado?.status !== "aberto" && { backgroundColor: "#9298A2" }]} />
+                <Text style={styles.topStatus} numberOfLines={1}>
+                  {chamado?.status === "aberto"
+                    ? chamado.admin_nome ? `Com ${chamado.admin_nome}` : "Aguardando atendente"
+                    : "Atendimento encerrado"}
+                </Text>
+              </View>
+            </View>
+            {chamado?.status === "aberto" ? (
+              <Pressable onPress={confirmarFechamento} disabled={fechando}
+                accessibilityRole="button" accessibilityLabel="Encerrar atendimento"
+                style={styles.topClose}>
+                <Ionicons name="close-circle-outline" size={20} color="#F4B6B6" />
+                {desktop ? <Text style={styles.topCloseText}>{fechando ? "Encerrando..." : "Encerrar atendimento"}</Text> : null}
+              </Pressable>
+            ) : null}
+          </View>
+
+          {erro ? (
+            <View style={styles.errorBox}><Text style={styles.errorText}>{erro}</Text></View>
+          ) : null}
+
+          <ScrollView
+            ref={scrollRef}
+            style={styles.messages}
+            contentContainerStyle={styles.messagesContent}
+            showsVerticalScrollIndicator={false}
+            onScroll={(evento) => {
+              const { contentOffset, contentSize, layoutMeasurement } = evento.nativeEvent;
+              noFinalRef.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 110;
+            }}
+            scrollEventThrottle={120}
+          >
+            <View style={styles.welcomeBlock}>
+              <View style={styles.welcomeIcon}><Ionicons name="sparkles-outline" size={20} color="#F7C680" /></View>
+              <Text style={styles.welcomeEyebrow}>CONVERSA PRIVADA</Text>
+              <Text style={styles.welcomeTitle}>{chamado?.assunto || "Como podemos ajudar?"}</Text>
+              <Text style={styles.welcomeDescription}>Converse com a equipe por aqui. Seu histórico ficará disponível neste atendimento.</Text>
+              <View style={styles.welcomeStatus}><View style={styles.topStatusDot}/><Text style={styles.welcomeStatusText}>{chamado?.status === "aberto" ? chamado.admin_nome ? `Atendido por ${chamado.admin_nome}` : "Aguardando a equipe" : "Chamado encerrado"}</Text></View>
+            </View>
+
+            {mensagens.map((item) => {
+              if (item.remetente_tipo === "sistema") {
+                // Aviso de entrada fica centralizado; a orientação inicial continua como balão do bot.
+                if (/\bentrou no atendimento\.?\s*$/i.test(item.mensagem.trim())) {
+                  return (
+                    <View key={item.id} style={styles.entryNoticeRow}>
+                      <View style={styles.entryNoticeLine} />
+                      <View style={styles.entryNoticePill}>
+                        <Ionicons name="shield-checkmark-outline" size={13} color="#D8C0FF" />
+                        <Text style={styles.entryNoticeText}>{item.mensagem}</Text>
+                      </View>
+                      <View style={styles.entryNoticeLine} />
+                    </View>
+                  );
+                }
+                return (
+                  <View key={item.id} style={[styles.messageRow, styles.messageRowAdmin]}>
+                    <View style={styles.botAvatar}>
+                      <View style={styles.botAntenna} />
+                      <View style={styles.botFace}>
+                        <View style={styles.botEye} />
+                        <View style={styles.botEye} />
+                      </View>
+                      <View style={styles.botChin} />
+                    </View>
+                    <View style={[styles.messageBubble, styles.messageBubbleBot]}>
+                      <View style={styles.botNameRow}>
+                        <Text style={styles.botName}>Bot Orvena</Text>
+                        <View style={styles.botBadge}>
+                          <Text style={styles.botBadgeText}>AUTOMÁTICO</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.messageText}>{item.mensagem}</Text>
+                      <Text style={styles.messageTime}>{hora(item.criado_em)}</Text>
+                    </View>
+                  </View>
+                );
+              }
+
+              const usuario = item.remetente_tipo === "usuario";
+              const contemFoto = (anexos[item.id] || []).some(fotoNaConversa);
+
+              return (
+                <View
+                  key={item.id}
+                  style={[
+                    styles.messageRow,
+                    usuario
+                      ? styles.messageRowUser
+                      : styles.messageRowAdmin,
+                  ]}
+                >
+                  {!usuario ? (
+                    <View style={styles.adminAvatar}>
+                      <Ionicons name="headset-outline" size={21} color="#D9FFF8" />
+                    </View>
+                  ) : null}
+
+                  <View
+                    style={[
+                      styles.messageBubble,
+                      usuario
+                        ? styles.messageBubbleUser
+                        : styles.messageBubbleAdmin,
+                      contemFoto && { width: larguraBalaoFoto, maxWidth: "100%", paddingHorizontal: 8, paddingVertical: 8 },
+                    ]}
+                  >
+                    {!usuario ? (
+                      <Text style={styles.senderName}>
+                        {chamado?.admin_nome || "Suporte Orvena"}
+                      </Text>
+                    ) : null}
+
+                    {item.mensagem.trim() && !(item.mensagem === `📎 ${(anexos[item.id] || [])[0]?.nome_arquivo}` && (anexos[item.id] || []).some(fotoNaConversa)) ? (
+                      <Text style={[styles.messageText, usuario && styles.messageTextUser]}>
+                        {item.mensagem}
+                      </Text>
+                    ) : null}
+
+                    {(anexos[item.id] || []).map((anexo) =>
+                      fotoNaConversa(anexo) && urlsAnexos[anexo.id] ? (
+                        <Pressable key={anexo.id} onPress={() => abrirAnexo(urlsAnexos[anexo.id])}
+                          accessibilityRole="button" accessibilityLabel={`Abrir foto ${anexo.nome_arquivo}`}
+                          style={styles.fotoConversa}>
+                          <FotoMensagem uri={urlsAnexos[anexo.id]} largura={larguraBalaoFoto - 16} />
+                        </Pressable>
+                      ) : (
+                        <Pressable key={anexo.id} onPress={() => abrirAnexo(urlsAnexos[anexo.id])}
+                          style={styles.anexoCard} accessibilityRole="button" accessibilityLabel={`Abrir arquivo ${anexo.nome_arquivo}`}>
+                          <Ionicons name="document-attach-outline" size={25} color="#8AE1D8" />
+                          <Text style={styles.anexoNome} numberOfLines={2}>{anexo.nome_arquivo}{"\n"}
+                            <Text style={styles.anexoTamanho}>{tamanhoLegivel(anexo.tamanho_bytes)} · Toque para abrir</Text>
+                          </Text>
+                          <Ionicons name="open-outline" size={18} color="#8AE1D8" />
+                        </Pressable>
+                      )
+                    )}
+
+                    <Text
+                      style={[
+                        styles.messageTime,
+                        usuario && styles.messageTimeUser,
+                      ]}
+                    >
+                      {hora(item.criado_em)}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+
+            {adminDigitando && chamado?.status === "aberto" ? <DigitandoMensagem nome="Suporte" /> : null}
+
+            {chamado?.status === "fechado" ? (
+              <View style={styles.closedCard}>
+                <Text style={styles.closedTitle}>Atendimento encerrado</Text>
+                <Text style={styles.closedText}>
+                  Este chat está fechado e não aceita novas mensagens.
+                </Text>
+              </View>
+            ) : null}
+          </ScrollView>
+
+          {chamado?.status === "aberto" ? (
+            <View style={styles.composerDock}>
+              {arquivoSelecionado ? (
+                <View style={styles.anexoSelecionado}>
+                  <Ionicons name="attach" size={19} color="#C9B9FF" />
+                  <Text style={styles.anexoSelecionadoTexto} numberOfLines={1}>
+                    {arquivoSelecionado.nome} {arquivoSelecionado.tamanho ? `· ${tamanhoLegivel(arquivoSelecionado.tamanho)}` : ""}
+                  </Text>
+                  <Pressable onPress={() => { bytesDocumentoRef.current = null; setArquivoSelecionado(null); }} disabled={enviandoArquivo}>
+                    <Ionicons name="close-circle" size={23} color="#F4B4C0" />
+                  </Pressable>
+                </View>
+              ) : null}
+              <View style={[styles.composer, !desktop && styles.composerMobile]}>
+                <Pressable style={[styles.attachButton, !desktop && styles.attachButtonMobile]} onPress={escolherFoto} disabled={enviandoArquivo || enviando}>
+                  <Ionicons name="image-outline" size={22} color="#F4C47D" />
+                </Pressable>
+                <Pressable style={[styles.attachButton, !desktop && styles.attachButtonMobile]} onPress={escolherDocumento} disabled={enviandoArquivo || enviando}>
+                  <Ionicons name="attach" size={22} color="#F4C47D" />
+                </Pressable>
+              <TextInput
+                ref={inputRef}
+                onLayout={(evento) => { larguraInputRef.current = evento.nativeEvent.layout.width; }}
+                value={texto}
+                onChangeText={alterarTexto}
+                placeholder="Escreva sua mensagem..."
+                placeholderTextColor="#AAB5C2"
+                style={[
+                  styles.composerInput,
+                  { height: alturaInput, maxHeight: ALTURA_MAX_INPUT },
+                  Platform.OS === "web" ? styles.composerInputWeb : null,
+                ]}
+                multiline
+                textAlignVertical="top"
+                scrollEnabled={alturaInput >= ALTURA_MAX_INPUT}
+                returnKeyType="send"
+                submitBehavior="submit"
+                onContentSizeChange={(evento) => {
+                  if (Platform.OS === "web") return;
+                  if (!texto) return;
+                  const alturaConteudo = evento.nativeEvent.contentSize.height || ALTURA_MIN_INPUT;
+                  const proximaAltura = Math.max(ALTURA_MIN_INPUT, Math.min(ALTURA_MAX_INPUT, alturaConteudo + 4));
+                  setAlturaInput((atual) => Math.abs(atual - proximaAltura) > 1 ? proximaAltura : atual);
+                }}
+                onKeyPress={(evento: any) => {
+                  if (Platform.OS !== "web") return;
+                  if (evento?.nativeEvent?.key !== "Enter") return;
+                  if (evento?.nativeEvent?.shiftKey) return;
+                  if (typeof evento?.preventDefault === "function") evento.preventDefault();
+                  if (arquivoSelecionado) {
+                    if (!enviandoArquivo) void enviarArquivo();
+                    return;
+                  }
+                  if (texto.trim() && !enviando) void enviar();
+                }}
+                onSubmitEditing={() => {
+                  if (arquivoSelecionado) {
+                    void enviarArquivo();
+                  } else if (texto.trim() && !enviando) {
+                    void enviar();
+                  }
+                }}
+              />
+
+              <Pressable
+                style={[
+                  styles.sendButton,
+                  ((!texto.trim() && !arquivoSelecionado) || enviando || enviandoArquivo) && styles.sendButtonDisabled,
+                ]}
+                onPress={() => { if (arquivoSelecionado) void enviarArquivo(); else void enviar(); }}
+                disabled={(!texto.trim() && !arquivoSelecionado) || enviando || enviandoArquivo}
+              >
+                {enviando || enviandoArquivo ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Ionicons name="send" size={22} color="#1E2329" />
+                )}
+              </Pressable>
+              </View>
+            </View>
+          ) : (
+            <Pressable
+              style={styles.backSupportButton}
+              onPress={() => router.replace("/suporte" as any)}
+            >
+              <Text style={styles.backSupportText}>
+                VOLTAR PARA CENTRAL DE SUPORTE
+              </Text>
+            </Pressable>
+          )}
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+// Dimensões explícitas impedem que uma imagem com width: "100%" crie
+// dependência circular de layout e produza balões estreitos e muito altos.
+// Reserva um espaço estável: o carregamento da foto não altera a altura do chat.
+// Anima apenas a posição das letras; não altera a altura da conversa.
+function LetraDigitando({ letra, indice }: { letra: string; indice: number }) {
+  const deslocamento = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const animacao = Animated.loop(Animated.sequence([
+      Animated.delay(indice * 75),
+      Animated.timing(deslocamento, { toValue: -5, duration: 170, useNativeDriver: true }),
+      Animated.timing(deslocamento, { toValue: 0, duration: 170, useNativeDriver: true }),
+      Animated.delay(Math.max(0, 1060 - indice * 75)),
+    ]));
+    animacao.start();
+    return () => animacao.stop();
+  }, [deslocamento, indice]);
+  return <Animated.Text style={{ color: "#8AE1D8", fontSize: 16, fontWeight: "800", transform: [{ translateY: deslocamento }] }}>{letra}</Animated.Text>;
+}
+
+function DigitandoMensagem({ nome }: { nome: string }) {
+  return (
+    <View style={{ flexDirection: "row", justifyContent: "flex-start", minHeight: 47 }} accessibilityLabel={`${nome} está digitando`}>
+      <View style={{ flexDirection: "row", alignItems: "center", alignSelf: "flex-start", borderRadius: 18, borderBottomLeftRadius: 6, backgroundColor: "#182F37", borderWidth: 1, borderColor: "#33666A", paddingHorizontal: 18, paddingVertical: 12 }}>
+        <Text style={{ color: "#D8FFF7", fontSize: 15, marginRight: 6, fontWeight: "600" }}>{nome} está </Text>
+        {Array.from("Digitando...").map((letra, indice) => <LetraDigitando key={indice} letra={letra} indice={indice} />)}
+      </View>
+    </View>
+  );
+}
+
+function FotoMensagem({ uri, largura }: { uri: string; largura: number }) {
+  const larguraImagem = Math.min(Math.max(100, largura), 440);
+  return (
+    <Image
+      source={{ uri }}
+      style={{ width: larguraImagem, height: 280, borderRadius: 16, backgroundColor: "#0F1118" }}
+      resizeMode="contain"
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: "#171D23" },
+  flex: { flex: 1 },
+  loading: { flex: 1, alignItems: "center", justifyContent: "center" },
+  page: { flex: 1, width: "100%", maxWidth: 1760, alignSelf: "center", paddingHorizontal: 12, paddingTop: 4, paddingBottom: 10 },
+  pageDesktop: { maxWidth: 1760, paddingHorizontal: 24, paddingTop: 6, paddingBottom: 14 },
+  header: { flexDirection: "row", alignItems: "center", gap: 16, paddingHorizontal: 22, paddingVertical: 20, borderRadius: 22, borderWidth: 1, borderColor: "#243346", backgroundColor: "#101924", marginBottom: 12 },
+  headerMobile: { paddingHorizontal: 12, paddingVertical: 14, gap: 10, borderRadius: 18 },
+  backButton: { width: 48, height: 48, borderRadius: 15, borderWidth: 1, borderColor: "#365061", backgroundColor: "#172632", alignItems: "center", justifyContent: "center" },
+  backText: { color: "#F8FAFC", fontSize: 22, fontWeight: "800" },
+  headerMain: { flex: 1, minWidth: 0 },
+  eyebrow: { color: "#7CDED2", fontSize: 11, fontWeight: "800", letterSpacing: 1.1 },
+  title: { color: "#F8FAFC", fontSize: 26, fontWeight: "800", marginTop: 5, lineHeight: 32 },
+  titleMobile: { fontSize: 19, lineHeight: 24 },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
+  dot: { width: 9, height: 9, borderRadius: 5 },
+  dotOpen: { backgroundColor: "#53D8AE" },
+  dotClosed: { backgroundColor: "#A7B5C7" },
+  statusText: { color: "#CBD6E3", fontSize: 13, flexShrink: 1, lineHeight: 18 },
+  closeChatButton: { borderRadius: 14, borderWidth: 1, borderColor: "#744454", backgroundColor: "#361E29", paddingHorizontal: 14, minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5 },
+  closeChatButtonMobile: { paddingHorizontal: 9, minHeight: 42 },
+  closeChatText: { color: "#FFC9CD", fontSize: 11, fontWeight: "800", letterSpacing: 0.3 },
+  errorBox: { borderRadius: 13, backgroundColor: "#482A30", padding: 13, marginVertical: 7 },
+  errorText: { color: "#FFD7D7", fontSize: 13, lineHeight: 20 },
+  conversationHeader: { flexDirection: "row", alignItems: "center", gap: 13, paddingHorizontal: 20, paddingVertical: 16, backgroundColor: "#12212C", borderWidth: 1, borderColor: "#2C4450", borderTopLeftRadius: 20, borderTopRightRadius: 20 },
+  conversationIcon: { width: 46, height: 46, borderRadius: 15, backgroundColor: "#1B3A42", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#35666B" },
+  conversationHeading: { color: "#FAFDFF", fontSize: 18, fontWeight: "800" },
+  conversationSubheading: { color: "#BECDD9", fontSize: 12, marginTop: 4, lineHeight: 17 },
+  messages: { flex: 1, backgroundColor: "#171D23", borderRadius: 0, borderWidth: 0 },
+  messagesContent: { paddingHorizontal: 12, paddingTop: 8, paddingBottom: 18, gap: 19, flexGrow: 1 },
+  messagesContentDesktop: { paddingHorizontal: 30, paddingVertical: 26, gap: 20 },
+  infoBubble: { alignSelf: "center", borderRadius: 100, borderWidth: 1, borderColor: "#314D58", backgroundColor: "#172732", paddingHorizontal: 15, paddingVertical: 9, marginBottom: 12 },
+  infoBubbleText: { color: "#C8E6E5", fontSize: 11, textAlign: "center", fontWeight: "700", letterSpacing: 0.2 },
+  systemMessage: { flexDirection: "row", alignItems: "center", gap: 8, marginVertical: 5 },
+  systemLine: { flex: 1, height: 1, backgroundColor: "#314352" },
+  systemPill: { flexDirection: "row", alignItems: "center", gap: 7, borderRadius: 15, borderWidth: 1, borderColor: "#335F64", backgroundColor: "#152E35", paddingHorizontal: 12, paddingVertical: 10, maxWidth: "85%" },
+  systemIcon: { color: "#8AE1D8", fontSize: 13 },
+  systemText: { color: "#D9EEF0", fontSize: 12, fontWeight: "600", flexShrink: 1 },
+  messageRow: { flexDirection: "row", alignItems: "flex-end", gap: 10 },
+  messageRowUser: { justifyContent: "flex-end" },
+  messageRowAdmin: { justifyContent: "flex-start" },
+  botAvatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: "#1769EF", borderWidth: 1, borderColor: "#8DB8FF", alignItems: "center", justifyContent: "center" },
+  botAntenna: { width: 4, height: 6, borderRadius: 2, backgroundColor: "#FFFFFF", position: "absolute", top: 5 },
+  botFace: { width: 25, height: 19, borderRadius: 8, backgroundColor: "#FFFFFF", flexDirection: "row", alignItems: "center", justifyContent: "space-evenly", marginTop: 4 },
+  botEye: { width: 4, height: 6, borderRadius: 2, backgroundColor: "#246A7B" },
+  botChin: { width: 8, height: 5, backgroundColor: "#FFFFFF", position: "absolute", bottom: 5, borderBottomLeftRadius: 2, transform: [{ rotate: "-20deg" }] },
+  entryNoticeRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 11, paddingVertical: 8, width: "100%" },
+  entryNoticeLine: { height: 1, backgroundColor: "#394052", flex: 1 },
+  entryNoticePill: { maxWidth: "85%", flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 7, paddingHorizontal: 15, paddingVertical: 10, borderRadius: 30, borderWidth: 1, borderColor: "#554270", backgroundColor: "#282239" },
+  entryNoticeText: { color: "#F4EBFF", fontSize: 13, fontWeight: "700", textAlign: "center", flexShrink: 1 },
+  messageBubbleBot: { backgroundColor: "#2A343D", borderWidth: 0, borderBottomLeftRadius: 6 },
+  botNameRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 7, marginBottom: 7 },
+  botName: { color: "#9CEBE0", fontSize: 13, fontWeight: "800" },
+  botBadge: { backgroundColor: "#1E454D", borderRadius: 7, paddingHorizontal: 7, paddingVertical: 4 },
+  botBadgeText: { color: "#A4F2E4", fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
+  adminAvatar: { width: 36, height: 36, borderRadius: 13, backgroundColor: "#46535E", alignItems: "center", justifyContent: "center" },
+  adminAvatarText: { color: "#FFFFFF", fontSize: 13, fontWeight: "800" },
+  messageBubble: { maxWidth: "85%", borderRadius: 21, paddingHorizontal: 17, paddingVertical: 13, minWidth: 75 },
+  messageBubbleUser: { backgroundColor: "#EBC493", borderBottomRightRadius: 6 },
+  messageBubbleAdmin: { backgroundColor: "#2A343D", borderWidth: 0, borderBottomLeftRadius: 6 },
+  senderName: { color: "#F1CA94", fontSize: 13, fontWeight: "800", marginBottom: 7 },
+  messageText: { color: "#F6F7F7", fontSize: 16, lineHeight: 25, fontWeight: "500" },
+  messageTextUser: { color: "#242424" },
+  messageTime: { color: "#AAB6BF", fontSize: 11, textAlign: "right", marginTop: 9, fontWeight: "600" },
+  messageTimeUser: { color: "#62533F" },
+  closedCard: { alignSelf: "center", width: "92%", maxWidth: 500, borderRadius: 17, borderWidth: 1, borderColor: "#385D68", backgroundColor: "#1B303C", padding: 18, marginTop: 16 },
+  closedTitle: { color: "#FFFFFF", fontSize: 16, fontWeight: "800", textAlign: "center" },
+  closedText: { color: "#C5D7E1", fontSize: 14, lineHeight: 21, textAlign: "center", marginTop: 7 },
+  attachButton: { width: 40, height: 49, borderRadius: 15, borderWidth: 0, backgroundColor: "#303943", alignItems: "center", justifyContent: "center" },
+  attachButtonMobile: { width: 41, height: 52, borderRadius: 13 },
+  anexoSelecionado: { flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 14, backgroundColor: "#172B35", borderWidth: 1, borderColor: "#335B62", padding: 12, marginTop: 10 },
+  anexoSelecionadoTexto: { flex: 1, color: "#ECFEFF", fontSize: 13, fontWeight: "600" },
+  anexoCard: { flexDirection: "row", alignItems: "center", gap: 10, borderRadius: 13, padding: 12, backgroundColor: "#37434D", marginTop: 10, minWidth: 150 },
+  anexoImagem: { width: 95, height: 82, borderRadius: 9 },
+  fotoConversa: { marginTop: 8, borderRadius: 13, overflow: "hidden", alignSelf: "flex-start", backgroundColor: "#0B1420" },
+  anexoNome: { flex: 1, color: "#FFFFFF", fontSize: 13, fontWeight: "700" },
+  anexoTamanho: { color: "#CED7DE", fontSize: 11, fontWeight: "400" },
+  composer: { flexDirection: "row", alignItems: "flex-end", gap: 9, borderTopWidth: 0, paddingTop: 2, paddingBottom: 2, marginTop: 0 },
+  composerMobile: { gap: 7, paddingHorizontal: 9, paddingVertical: 10, borderRadius: 16 },
+  composerInput: { flex: 1, minHeight: ALTURA_MIN_INPUT, borderRadius: 16, borderWidth: 0, backgroundColor: "#303943", color: "#FFFFFF", fontSize: 16, lineHeight: 23, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 12, textAlignVertical: "top" },
+  composerInputWeb: { outlineWidth: 0, outlineColor: "transparent", boxShadow: "none", resize: "none", overflowY: "auto", scrollbarWidth: "none" } as any,
+  sendButton: { width: 49, height: 49, borderRadius: 16, backgroundColor: "#F4C47D", alignItems: "center", justifyContent: "center" },
+  sendButtonDisabled: { opacity: 0.4 },
+  sendButtonText: { color: "#061D25", fontSize: 20, fontWeight: "800" },
+  backSupportButton: { minHeight: 55, borderRadius: 14, backgroundColor: "#172B35", borderWidth: 1, borderColor: "#356A69", alignItems: "center", justifyContent: "center", marginTop: 12 },
+  backSupportText: { color: "#A9F4E9", fontSize: 12, fontWeight: "800" },
+
+  // Redesign editorial: um único plano contínuo, barra compacta e compositor flutuante.
+  topBar: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 10, paddingVertical: 12, marginBottom: 2 },
+  topBack: { height: 44, width: 38, justifyContent: "center", alignItems: "center" },
+  topAvatar: { height: 48, width: 48, borderRadius: 17, backgroundColor: "#F4C47D", justifyContent: "center", alignItems: "center" },
+  topTitleArea: { flex: 1, minWidth: 0 },
+  topTitle: { color: "#F8F7F4", fontSize: 19, fontWeight: "800", letterSpacing: -0.35 },
+  topStatusRow: { flexDirection: "row", alignItems: "center", gap: 7, marginTop: 4 },
+  topStatusDot: { height: 8, width: 8, borderRadius: 4, backgroundColor: "#6BD6AC" },
+  topStatus: { color: "#B5C0CB", fontSize: 12, fontWeight: "600", flexShrink: 1 },
+  topClose: { minHeight: 42, minWidth: 42, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, paddingHorizontal: 11, borderRadius: 13, backgroundColor: "#37282E" },
+  topCloseText: { color: "#FFD1D1", fontSize: 12, fontWeight: "700" },
+  welcomeBlock: { alignSelf: "center", alignItems: "center", width: "100%", maxWidth: 520, paddingHorizontal: 18, paddingTop: 23, paddingBottom: 32 },
+  welcomeIcon: { width: 44, height: 44, borderRadius: 15, backgroundColor: "#352F29", alignItems: "center", justifyContent: "center", marginBottom: 14 },
+  welcomeEyebrow: { color: "#F4C47D", fontSize: 10, fontWeight: "900", letterSpacing: 2 },
+  welcomeTitle: { color: "#F8F7F4", fontSize: 23, fontWeight: "800", marginTop: 8, textAlign: "center", lineHeight: 29 },
+  welcomeDescription: { color: "#AEB8C3", fontSize: 13, lineHeight: 20, textAlign: "center", marginTop: 9 },
+  welcomeStatus: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 17, paddingHorizontal: 13, paddingVertical: 8, borderRadius: 20, backgroundColor: "#232C30" },
+  welcomeStatusText: { color: "#CADAD5", fontSize: 12, fontWeight: "600" },
+  composerDock: { backgroundColor: "#20262D", borderRadius: 25, paddingHorizontal: 12, paddingTop: 8, paddingBottom: 8, marginTop: 10 },
+  footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 9, paddingTop: 5, paddingBottom: 5 },
+  footerPrivate: { flexDirection: "row", alignItems: "center", gap: 5 },
+  footerPrivateText: { color: "#9DA7B3", fontSize: 11, fontWeight: "500" },
+  footerClose: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 5, paddingVertical: 5 },
+  footerCloseText: { color: "#E8ACAB", fontSize: 11, fontWeight: "700" },
+});

@@ -1,0 +1,409 @@
+import { useAudioPlayer } from "expo-audio";
+import { router } from "expo-router";
+import { useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+import { supabase } from "../../lib/supabase";
+
+export default function NovoSuporteScreen() {
+  const startPlayer = useAudioPlayer(
+    require("../../assets/sounds/support-send.wav")
+  );
+
+  const [assunto, setAssunto] = useState("");
+  const [mensagem, setMensagem] = useState("");
+  const [enviando, setEnviando] = useState(false);
+  const [erro, setErro] = useState("");
+
+  const podeEnviar = useMemo(
+    () =>
+      assunto.trim().length >= 3 &&
+      mensagem.trim().length >= 10 &&
+      !enviando,
+    [assunto, mensagem, enviando]
+  );
+
+  async function iniciarAtendimento() {
+    setErro("");
+
+    if (!podeEnviar) return;
+
+    try {
+      setEnviando(true);
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        router.replace("/login" as any);
+        return;
+      }
+
+      const { data: aberto, error: abertoError } = await supabase
+        .from("suporte_chamados")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("status", "aberto")
+        .order("criado_em", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (abertoError) {
+        console.log("Erro ao verificar atendimento aberto:", abertoError);
+        setErro("Não foi possível verificar seus atendimentos.");
+        return;
+      }
+
+      if (aberto?.id) {
+        router.replace({
+          pathname: "/suporte/chat/[id]",
+          params: { id: aberto.id },
+        } as any);
+        return;
+      }
+
+      const agora = new Date().toISOString();
+
+      const { data: chamado, error: chamadoError } = await supabase
+        .from("suporte_chamados")
+        .insert({
+          user_id: user.id,
+          email_usuario: user.email || null,
+          assunto: assunto.trim(),
+          status: "aberto",
+          criado_em: agora,
+          atualizado_em: agora,
+        })
+        .select("id")
+        .single();
+
+      if (chamadoError || !chamado) {
+        console.log("Erro ao criar atendimento:", chamadoError);
+
+        if (chamadoError?.code === "23505") {
+          const { data: existente } = await supabase
+            .from("suporte_chamados")
+            .select("id")
+            .eq("user_id", user.id)
+            .eq("status", "aberto")
+            .limit(1)
+            .maybeSingle();
+
+          if (existente?.id) {
+            router.replace({
+              pathname: "/suporte/chat/[id]",
+              params: { id: existente.id },
+            } as any);
+            return;
+          }
+        }
+
+        setErro("Não foi possível iniciar o atendimento.");
+        return;
+      }
+
+      const { error: mensagemError } = await supabase
+        .from("suporte_mensagens")
+        .insert({
+          chamado_id: chamado.id,
+          remetente_tipo: "usuario",
+          remetente_id: user.id,
+          remetente_email: user.email || null,
+          mensagem: mensagem.trim(),
+          criado_em: agora,
+        });
+
+      if (mensagemError) {
+        console.log("Erro ao enviar primeira mensagem:", mensagemError);
+        setErro("O atendimento foi criado, mas a mensagem não foi enviada.");
+        return;
+      }
+
+      await supabase
+        .from("suporte_chamados")
+        .update({ atualizado_em: agora })
+        .eq("id", chamado.id)
+        .eq("user_id", user.id);
+
+      try {
+        startPlayer.seekTo(0);
+        startPlayer.play();
+      } catch (error) {
+        console.log("Erro ao tocar som de início do chat:", error);
+      }
+
+      setTimeout(() => {
+        router.replace({
+          pathname: "/suporte/chat/[id]",
+          params: { id: chamado.id },
+        } as any);
+      }, 180);
+    } catch (error) {
+      console.log("Erro novo suporte:", error);
+      setErro("Não foi possível iniciar o atendimento.");
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.page}>
+          <View style={styles.header}>
+            <Pressable style={styles.backButton} onPress={() => router.back()}>
+              <Text style={styles.backText}>←</Text>
+            </Pressable>
+
+            <View style={styles.headerMain}>
+              <Text style={styles.eyebrow}>NOVO ATENDIMENTO</Text>
+              <Text style={styles.title}>Fale com o suporte</Text>
+              <Text style={styles.subtitle}>
+                Conte o que aconteceu. Depois do envio, um chat será aberto.
+              </Text>
+            </View>
+          </View>
+
+          {erro ? (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{erro}</Text>
+            </View>
+          ) : null}
+
+          <View style={styles.card}>
+            <View style={styles.agentRow}>
+              <View style={styles.agentAvatar}>
+                <Text style={styles.agentEmoji}>👩‍💼</Text>
+              </View>
+
+              <View style={styles.agentMain}>
+                <Text style={styles.agentTitle}>Equipe Orvena</Text>
+                <Text style={styles.agentSubtitle}>
+                  Sua mensagem será enviada para o painel administrativo.
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.divider} />
+
+            <Text style={styles.label}>ASSUNTO</Text>
+            <TextInput
+              style={styles.input}
+              value={assunto}
+              onChangeText={setAssunto}
+              placeholder="Ex.: Problema ao gerar orçamento"
+              placeholderTextColor="#555C67"
+              maxLength={120}
+            />
+
+            <Text style={styles.label}>EXPLIQUE O QUE ACONTECEU</Text>
+            <TextInput
+              style={[styles.input, styles.textArea]}
+              value={mensagem}
+              onChangeText={setMensagem}
+              placeholder="Escreva sua mensagem..."
+              placeholderTextColor="#555C67"
+              multiline
+              textAlignVertical="top"
+              maxLength={2500}
+            />
+
+            <Text style={styles.counter}>{mensagem.length}/2500</Text>
+
+            <Pressable
+              style={[
+                styles.sendButton,
+                !podeEnviar && styles.sendButtonDisabled,
+              ]}
+              onPress={iniciarAtendimento}
+              disabled={!podeEnviar}
+            >
+              {enviando ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.sendButtonText}>
+                  INICIAR CHAT COM O SUPORTE
+                </Text>
+              )}
+            </Pressable>
+          </View>
+
+          <View style={styles.notice}>
+            <Text style={styles.noticeTitle}>Um atendimento por vez</Text>
+            <Text style={styles.noticeText}>
+              Se você já tiver um chat aberto, o Orvena vai continuar esse
+              atendimento em vez de criar outro. O chat fica aberto até você ou
+              um administrador encerrar.
+            </Text>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: "#0B0C10" },
+  scroll: { flexGrow: 1 },
+  page: {
+    width: "100%",
+    maxWidth: 850,
+    alignSelf: "center",
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 50,
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 13,
+    marginBottom: 20,
+  },
+  backButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#292E37",
+    backgroundColor: "#13161C",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  backText: { color: "#FFFFFF", fontSize: 23, fontWeight: "900" },
+  headerMain: { flex: 1 },
+  eyebrow: {
+    color: "#7C5CFF",
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 1.2,
+  },
+  title: {
+    color: "#FFFFFF",
+    fontSize: 27,
+    fontWeight: "900",
+    marginTop: 4,
+  },
+  subtitle: {
+    color: "#7D848F",
+    fontSize: 11,
+    lineHeight: 17,
+    marginTop: 5,
+  },
+  errorBox: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#552C35",
+    backgroundColor: "#211217",
+    padding: 12,
+    marginBottom: 14,
+  },
+  errorText: { color: "#FF8A93", fontSize: 10 },
+  card: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#2B3039",
+    backgroundColor: "#12151B",
+    padding: 17,
+  },
+  agentRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  agentAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 15,
+    backgroundColor: "#211B38",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  agentEmoji: { fontSize: 23 },
+  agentMain: { flex: 1 },
+  agentTitle: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
+  agentSubtitle: {
+    color: "#747B86",
+    fontSize: 9,
+    lineHeight: 14,
+    marginTop: 4,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: "#252A32",
+    marginVertical: 16,
+  },
+  label: {
+    color: "#858C97",
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+    marginBottom: 7,
+  },
+  input: {
+    minHeight: 50,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#292E37",
+    backgroundColor: "#0E1116",
+    paddingHorizontal: 13,
+    color: "#FFFFFF",
+    fontSize: 11,
+    marginBottom: 15,
+  },
+  textArea: {
+    minHeight: 155,
+    paddingTop: 13,
+    paddingBottom: 13,
+    lineHeight: 18,
+    marginBottom: 5,
+  },
+  counter: {
+    color: "#555C67",
+    fontSize: 8,
+    textAlign: "right",
+    marginBottom: 14,
+  },
+  sendButton: {
+    minHeight: 51,
+    borderRadius: 14,
+    backgroundColor: "#7C5CFF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sendButtonDisabled: { opacity: 0.35 },
+  sendButtonText: {
+    color: "#FFFFFF",
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  notice: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#292E37",
+    backgroundColor: "#111319",
+    padding: 14,
+    marginTop: 12,
+  },
+  noticeTitle: { color: "#D9DCE1", fontSize: 10, fontWeight: "900" },
+  noticeText: {
+    color: "#747B86",
+    fontSize: 9,
+    lineHeight: 15,
+    marginTop: 5,
+  },
+});
